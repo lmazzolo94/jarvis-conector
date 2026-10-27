@@ -16,28 +16,37 @@ async function tokenValido(k) {
   if (ok) validos.add(k);
   return ok;
 }
+const escapar = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 async function sintetizar(texto) {
   const voz = new MsEdgeTTS();
   await voz.setMetadata(VOZ, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-  const { audioStream } = voz.toStream(texto.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'), PROSODIA);
+  const { audioStream } = voz.toStream(escapar(texto), PROSODIA);
   const partes = [];
   for await (const c of audioStream) partes.push(c);
   voz.close();
   return Buffer.concat(partes);
 }
-async function tts(req, res, k) {
-  let texto = '';
-  for await (const c of req) texto += c;
-  texto = texto.slice(0, 3000);
+// GET /tts/<TOKEN>?t=texto → el mp3 va saliendo a medida que se genera (el navegador empieza a sonar enseguida).
+async function tts(res, k, texto) {
+  texto = texto.slice(0, 1500);
   if (!texto.trim()) return res.writeHead(400).end();
-  if (!(await tokenValido(k))) return res.writeHead(403).end();
-  res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Access-Control-Allow-Origin': '*' }).end(await sintetizar(texto));
+  const voz = new MsEdgeTTS();
+  const [ok] = await Promise.all([tokenValido(k), voz.setMetadata(VOZ, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3)]);
+  if (!ok) { voz.close(); return res.writeHead(403).end(); }
+  const { audioStream } = voz.toStream(escapar(texto), PROSODIA);
+  res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+  audioStream.on('end', () => voz.close());
+  audioStream.on('error', () => { voz.close(); res.destroy(); });
+  audioStream.pipe(res);
 }
 
 http.createServer(async (req, res) => {
-  const t = req.url.match(/^\/tts\/([a-f0-9]{16,64})$/);
-  if (t && req.method === 'OPTIONS') return res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type' }).end();
-  if (t && req.method === 'POST') return tts(req, res, t[1]).catch(e => res.writeHead(502, { 'Access-Control-Allow-Origin': '*' }).end(e.message));
+  const t = req.url.match(/^\/tts\/([a-f0-9]{16,64})\?t=(.*)$/);
+  if (t && req.method === 'GET') {
+    let texto = '';
+    try { texto = decodeURIComponent(t[2].replace(/\+/g, ' ')); } catch (e) { return res.writeHead(400).end(); }
+    return tts(res, t[1], texto).catch(e => { if (!res.headersSent) res.writeHead(502).end(e.message); else res.destroy(); });
+  }
   const m = req.url.match(/^\/mcp\/([a-f0-9]{16,64})\/?(\?.*)?$/);
   if (req.url === '/') return res.writeHead(200).end('ok');
   if (!m) return res.writeHead(404).end();
